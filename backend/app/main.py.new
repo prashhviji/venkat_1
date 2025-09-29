@@ -1,0 +1,107 @@
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, List, Dict
+from .models import CropRecommender, CropRotationPredictor, CropYieldPredictor
+
+app = FastAPI(title="Crop-Wise API")
+
+# Allow cross-origin requests from frontend (adjust origins in production)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize models (will be set in startup event)
+recommender = None
+rotation_predictor = None
+yield_predictor = None
+
+class RecoRequest(BaseModel):
+    temperature: Optional[float] = None
+    humidity: Optional[float] = None
+    rainfall: Optional[float] = None
+    ph: Optional[float] = None
+    nitrogen: Optional[float] = None
+    phosphorous: Optional[float] = None
+    potassium: Optional[float] = None
+    carbon: Optional[float] = None
+    soil: Optional[str] = None
+
+class RotationRequest(BaseModel):
+    region: Optional[str] = None
+    soil_type: Optional[str] = None
+    start_season: Optional[str] = None
+    crop1: Optional[str] = None
+    crop2: Optional[str] = None
+    crop3: Optional[str] = None
+    number_of_seasons: Optional[int] = None
+
+class YieldRequest(BaseModel):
+    crop: Optional[str] = None
+    season: Optional[str] = None
+    state: Optional[str] = None
+    area_hectares: Optional[float] = None
+
+class SimpleResponse(BaseModel):
+    crops: List[str]
+
+class RotationResponse(BaseModel):
+    yield_t_per_ha: Optional[float]
+    carbon_kg_co2: Optional[float]
+
+class YieldResponse(BaseModel):
+    yield_t_per_ha: Optional[float]
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize and train models at startup"""
+    global recommender, rotation_predictor, yield_predictor
+    
+    # Initialize recommendation model
+    recommender = CropRecommender()
+    if not recommender.load_model():  # Try to load saved model first
+        if recommender.train():  # Train if loading fails
+            recommender.save_model()  # Save for next time
+        
+    # Initialize rotation model
+    rotation_predictor = CropRotationPredictor()
+    if not rotation_predictor.load_models():
+        if rotation_predictor.train():
+            rotation_predictor.save_models()
+            
+    # Initialize yield model
+    yield_predictor = CropYieldPredictor()
+    if not yield_predictor.load_model():
+        if yield_predictor.train():
+            yield_predictor.save_model()
+
+@app.post("/api/recommend", response_model=SimpleResponse)
+async def recommend(req: RecoRequest):
+    """Get crop recommendations based on soil and environmental conditions"""
+    if recommender is None:
+        raise HTTPException(status_code=503, detail="Recommendation model not initialized")
+        
+    predictions, _ = recommender.predict(req.dict())
+    return {"crops": predictions[:3] if predictions else []}
+
+@app.post("/api/rotation", response_model=RotationResponse)
+async def predict_rotation(req: RotationRequest):
+    """Predict yield and carbon sequestration for crop rotation pattern"""
+    if rotation_predictor is None:
+        raise HTTPException(status_code=503, detail="Rotation model not initialized")
+        
+    result = rotation_predictor.predict(req.dict())
+    return result
+
+@app.post("/api/yield", response_model=YieldResponse)
+async def predict_yield(req: YieldRequest):
+    """Predict crop yield based on crop type, season, and location"""
+    if yield_predictor is None:
+        raise HTTPException(status_code=503, detail="Yield model not initialized")
+        
+    result = yield_predictor.predict(req.dict())
+    return {"yield_t_per_ha": result}
